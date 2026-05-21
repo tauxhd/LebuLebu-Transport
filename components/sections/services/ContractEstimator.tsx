@@ -86,19 +86,24 @@ export default function ContractEstimator() {
   const [exOp, setExOp] = useState<"with" | "without">("with");
 
   useEffect(() => {
-    async function fetchPricing() {
-      try {
-        const res = await fetch("/api/pricing");
-        const data = await res.json();
-        setPricing(data);
-      } catch {
-        console.error("Failed to fetch pricing");
-      } finally {
-        setLoadingPricing(false);
-      }
+  async function fetchPricing() {
+    try {
+      const res = await fetch("/api/pricing?t=" + Date.now());
+      const data = await res.json();
+      setPricing(data);
+    } catch {
+      console.error("Failed to fetch pricing");
+    } finally {
+      setLoadingPricing(false);
     }
-    fetchPricing();
-  }, []);
+  }
+
+  fetchPricing();
+
+  // Refetch when admin saves pricing
+  window.addEventListener("pricing-updated", fetchPricing);
+  return () => window.removeEventListener("pricing-updated", fetchPricing);
+}, []);
 
   function toggleService(key: ServiceKey) {
     const anyOther = Object.keys(selected).some(
