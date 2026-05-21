@@ -1,9 +1,52 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Bus, Trash2, Hammer, AlertTriangle, CheckCircle2 } from "lucide-react";
 
 type ServiceKey = "bus" | "garbage" | "excavation";
+
+interface BusConfig {
+  baseRatePerBusPerDay: number;
+  extraHourlyRate: number;
+  maxBuses: number;
+  maxHoursPerDay: number;
+  minHoursPerDay: number;
+  maxDaysPerWeek: number;
+  yearlyDiscount: number;
+  routeMultipliers: { standard: number; extended: number; remote: number };
+}
+
+interface GarbageConfig {
+  baseRatePerTruckPerWeek: number;
+  maxTrucks: number;
+  maxCollectionsPerWeek: number;
+  yearlyDiscount: number;
+  volumeMultipliers: { small: number; medium: number; large: number };
+  typeMultipliers: { general: number; mixed: number; hazardous: number };
+}
+
+interface ExcavationConfig {
+  extraHourlyRate: number;
+  maxUnits: number;
+  maxHoursPerDay: number;
+  minHoursPerDay: number;
+  maxDays: number;
+  operatorMultiplier: number;
+  yearlyDiscount: number;
+  equipmentRates: {
+    excavator_standard: number;
+    excavator_large: number;
+    backhoe: number;
+    bulldozer: number;
+    compactor: number;
+  };
+}
+
+interface Pricing {
+  bus: BusConfig;
+  garbage: GarbageConfig;
+  excavation: ExcavationConfig;
+}
 
 const serviceList = [
   { key: "bus" as ServiceKey, icon: Bus, label: "Bus Services", sub: "Passenger transport" },
@@ -16,6 +59,9 @@ function fmt(n: number) {
 }
 
 export default function ContractEstimator() {
+  const [pricing, setPricing] = useState<Pricing | null>(null);
+  const [loadingPricing, setLoadingPricing] = useState(true);
+
   const [billing, setBilling] = useState<"monthly" | "yearly">("monthly");
   const [selected, setSelected] = useState<Record<ServiceKey, boolean>>({
     bus: true, garbage: true, excavation: true,
@@ -26,18 +72,33 @@ export default function ContractEstimator() {
   const [busCount, setBusCount] = useState(2);
   const [busHrs, setBusHrs] = useState(8);
   const [busDays, setBusDays] = useState(5);
-  const [busRoute, setBusRoute] = useState(1);
+  const [busRoute, setBusRoute] = useState<"standard" | "extended" | "remote">("standard");
 
   const [gbTrucks, setGbTrucks] = useState(1);
   const [gbFreq, setGbFreq] = useState(3);
-  const [gbVol, setGbVol] = useState(1);
-  const [gbType, setGbType] = useState(1);
+  const [gbVol, setGbVol] = useState<"small" | "medium" | "large">("small");
+  const [gbType, setGbType] = useState<"general" | "mixed" | "hazardous">("general");
 
-  const [exType, setExType] = useState(800);
+  const [exEquipment, setExEquipment] = useState<keyof ExcavationConfig["equipmentRates"]>("excavator_standard");
   const [exUnits, setExUnits] = useState(1);
   const [exHrs, setExHrs] = useState(8);
   const [exDays, setExDays] = useState(20);
-  const [exOp, setExOp] = useState(1.2);
+  const [exOp, setExOp] = useState<"with" | "without">("with");
+
+  useEffect(() => {
+    async function fetchPricing() {
+      try {
+        const res = await fetch("/api/pricing");
+        const data = await res.json();
+        setPricing(data);
+      } catch {
+        console.error("Failed to fetch pricing");
+      } finally {
+        setLoadingPricing(false);
+      }
+    }
+    fetchPricing();
+  }, []);
 
   function toggleService(key: ServiceKey) {
     const anyOther = Object.keys(selected).some(
@@ -53,25 +114,54 @@ export default function ContractEstimator() {
   }
 
   function calcBus() {
-    const extra = Math.max(0, busHrs - 8) * 30;
-    return Math.round((250 + extra) * busRoute * busCount * busDays * 4.33);
-  }
-  function calcGarbage() {
-    return Math.round(400 * gbTrucks * gbVol * gbType * (gbFreq / 3) * 4.33);
-  }
-  function calcExcavation() {
-    const extra = Math.max(0, exHrs - 8) * 50;
-    return Math.round((exType * exOp + extra) * exUnits * exDays);
+    if (!pricing) return 0;
+    const { baseRatePerBusPerDay, extraHourlyRate, routeMultipliers } = pricing.bus;
+    const extra = Math.max(0, busHrs - 8) * extraHourlyRate;
+    return Math.round((baseRatePerBusPerDay + extra) * routeMultipliers[busRoute] * busCount * busDays * 4.33);
   }
 
-  const disc = billing === "yearly" ? 0.9 : 1;
+  function calcGarbage() {
+    if (!pricing) return 0;
+    const { baseRatePerTruckPerWeek, volumeMultipliers, typeMultipliers } = pricing.garbage;
+    return Math.round(baseRatePerTruckPerWeek * gbTrucks * volumeMultipliers[gbVol] * typeMultipliers[gbType] * (gbFreq / 3) * 4.33);
+  }
+
+  function calcExcavation() {
+    if (!pricing) return 0;
+    const { extraHourlyRate, equipmentRates, operatorMultiplier } = pricing.excavation;
+    const dayRate = equipmentRates[exEquipment];
+    const extra = Math.max(0, exHrs - 8) * extraHourlyRate;
+    const opMultiplier = exOp === "with" ? operatorMultiplier : 1;
+    return Math.round((dayRate * opMultiplier + extra) * exUnits * exDays);
+  }
+
+  const disc = billing === "yearly"
+    ? (pricing?.bus.yearlyDiscount ?? 0.1)
+    : 0;
   const mult = billing === "yearly" ? 12 : 1;
-  const busAmt = selected.bus ? Math.round(calcBus() * mult * disc) : 0;
-  const gbAmt = selected.garbage ? Math.round(calcGarbage() * mult * disc) : 0;
-  const exAmt = selected.excavation ? Math.round(calcExcavation() * disc) : 0;
+
+  const busAmt = selected.bus ? Math.round(calcBus() * mult * (1 - disc)) : 0;
+  const gbAmt = selected.garbage ? Math.round(calcGarbage() * mult * (1 - (billing === "yearly" ? (pricing?.garbage.yearlyDiscount ?? 0.1) : 0))) : 0;
+  const exAmt = selected.excavation ? Math.round(calcExcavation() * (1 - (billing === "yearly" ? (pricing?.excavation.yearlyDiscount ?? 0.1) : 0))) : 0;
   const total = busAmt + gbAmt + exAmt;
 
   const inputClass = "w-full border border-charcoal/15 rounded-lg px-3 py-2.5 text-sm bg-offwhite focus:outline-none focus:border-navy text-charcoal";
+
+  if (loadingPricing) {
+    return (
+      <div className="flex items-center justify-center py-20 text-charcoal/30 text-sm">
+        Loading pricing...
+      </div>
+    );
+  }
+
+  if (!pricing) {
+    return (
+      <div className="bg-red-50 border border-red-200 text-red-600 text-xs px-4 py-3 rounded-lg">
+        Failed to load pricing. Please refresh the page.
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -87,7 +177,9 @@ export default function ContractEstimator() {
           >
             {b === "monthly" ? "Monthly" : "Yearly"}
             {b === "yearly" && (
-              <span className="text-xs text-green-500 font-semibold">Save 10%</span>
+              <span className="text-xs text-green-500 font-semibold">
+                Save {Math.round((pricing.bus.yearlyDiscount) * 100)}%
+              </span>
             )}
           </button>
         ))}
@@ -133,7 +225,6 @@ export default function ContractEstimator() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Config panel */}
         <div className="lg:col-span-3 bg-white border border-charcoal/5 rounded-2xl overflow-hidden">
-          {/* Tabs */}
           <div className="flex bg-[#F5F7FA] border-b border-charcoal/5">
             {serviceList.map((s) => {
               const Icon = s.icon;
@@ -164,31 +255,58 @@ export default function ContractEstimator() {
                     <label className="text-xs font-medium text-charcoal/60">Number of buses</label>
                     <span className="text-xs font-bold text-navy">{busCount}</span>
                   </div>
-                  <input type="range" min={1} max={20} value={busCount} onChange={(e) => setBusCount(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={1}
+                    max={pricing.bus.maxBuses}
+                    value={busCount}
+                    onChange={(e) => setBusCount(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <div className="flex justify-between mb-2">
                     <label className="text-xs font-medium text-charcoal/60">Hours per day</label>
                     <span className="text-xs font-bold text-navy">{busHrs} hrs</span>
                   </div>
-                  <input type="range" min={4} max={24} value={busHrs} onChange={(e) => setBusHrs(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={pricing.bus.minHoursPerDay}
+                    max={pricing.bus.maxHoursPerDay}
+                    value={busHrs}
+                    onChange={(e) => setBusHrs(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <div className="flex justify-between mb-2">
                     <label className="text-xs font-medium text-charcoal/60">Days per week</label>
                     <span className="text-xs font-bold text-navy">{busDays} days</span>
                   </div>
-                  <input type="range" min={1} max={7} value={busDays} onChange={(e) => setBusDays(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={1}
+                    max={pricing.bus.maxDaysPerWeek}
+                    value={busDays}
+                    onChange={(e) => setBusDays(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <label className="text-xs font-medium text-charcoal/60 block mb-2">Route type</label>
-                  <select value={busRoute} onChange={(e) => setBusRoute(+e.target.value)} className={inputClass}>
-                    <option value={1}>Standard city route</option>
-                    <option value={1.3}>Extended / highway route</option>
-                    <option value={1.6}>Remote / out-of-city route</option>
+                  <select
+                    value={busRoute}
+                    onChange={(e) => setBusRoute(e.target.value as typeof busRoute)}
+                    className={inputClass}
+                  >
+                    <option value="standard">Standard city route (×{pricing.bus.routeMultipliers.standard})</option>
+                    <option value="extended">Extended / highway route (×{pricing.bus.routeMultipliers.extended})</option>
+                    <option value="remote">Remote / out-of-city route (×{pricing.bus.routeMultipliers.remote})</option>
                   </select>
                 </div>
-                <p className="text-xs text-charcoal/40">Base rate: K250/bus/day · Extended hours (&gt;8hrs): +K30/hr</p>
+                <p className="text-xs text-charcoal/40">
+                  Base rate: {fmt(pricing.bus.baseRatePerBusPerDay)}/bus/day · Extended hours (&gt;8hrs): +{fmt(pricing.bus.extraHourlyRate)}/hr
+                </p>
               </div>
             )}
 
@@ -200,32 +318,56 @@ export default function ContractEstimator() {
                     <label className="text-xs font-medium text-charcoal/60">Number of trucks</label>
                     <span className="text-xs font-bold text-navy">{gbTrucks}</span>
                   </div>
-                  <input type="range" min={1} max={10} value={gbTrucks} onChange={(e) => setGbTrucks(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={1}
+                    max={pricing.garbage.maxTrucks}
+                    value={gbTrucks}
+                    onChange={(e) => setGbTrucks(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <div className="flex justify-between mb-2">
                     <label className="text-xs font-medium text-charcoal/60">Collections per week</label>
                     <span className="text-xs font-bold text-navy">{gbFreq}×/week</span>
                   </div>
-                  <input type="range" min={1} max={7} value={gbFreq} onChange={(e) => setGbFreq(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={1}
+                    max={pricing.garbage.maxCollectionsPerWeek}
+                    value={gbFreq}
+                    onChange={(e) => setGbFreq(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <label className="text-xs font-medium text-charcoal/60 block mb-2">Waste volume</label>
-                  <select value={gbVol} onChange={(e) => setGbVol(+e.target.value)} className={inputClass}>
-                    <option value={1}>Small (residential / small office)</option>
-                    <option value={1.5}>Medium (commercial premises)</option>
-                    <option value={2.2}>Large (industrial / bulk)</option>
+                  <select
+                    value={gbVol}
+                    onChange={(e) => setGbVol(e.target.value as typeof gbVol)}
+                    className={inputClass}
+                  >
+                    <option value="small">Small (residential / small office) ×{pricing.garbage.volumeMultipliers.small}</option>
+                    <option value="medium">Medium (commercial premises) ×{pricing.garbage.volumeMultipliers.medium}</option>
+                    <option value="large">Large (industrial / bulk) ×{pricing.garbage.volumeMultipliers.large}</option>
                   </select>
                 </div>
                 <div>
                   <label className="text-xs font-medium text-charcoal/60 block mb-2">Waste type</label>
-                  <select value={gbType} onChange={(e) => setGbType(+e.target.value)} className={inputClass}>
-                    <option value={1}>General waste</option>
-                    <option value={1.4}>Mixed / construction waste</option>
-                    <option value={1.8}>Hazardous / special handling</option>
+                  <select
+                    value={gbType}
+                    onChange={(e) => setGbType(e.target.value as typeof gbType)}
+                    className={inputClass}
+                  >
+                    <option value="general">General waste ×{pricing.garbage.typeMultipliers.general}</option>
+                    <option value="mixed">Mixed / construction waste ×{pricing.garbage.typeMultipliers.mixed}</option>
+                    <option value="hazardous">Hazardous / special handling ×{pricing.garbage.typeMultipliers.hazardous}</option>
                   </select>
                 </div>
-                <p className="text-xs text-charcoal/40">Base rate: K400/truck/week · Volume & type multipliers applied</p>
+                <p className="text-xs text-charcoal/40">
+                  Base rate: {fmt(pricing.garbage.baseRatePerTruckPerWeek)}/truck/week
+                </p>
               </div>
             )}
 
@@ -238,12 +380,16 @@ export default function ContractEstimator() {
                 </div>
                 <div>
                   <label className="text-xs font-medium text-charcoal/60 block mb-2">Equipment type</label>
-                  <select value={exType} onChange={(e) => setExType(+e.target.value)} className={inputClass}>
-                    <option value={800}>Excavator (standard)</option>
-                    <option value={1200}>Excavator (large / heavy)</option>
-                    <option value={600}>Backhoe loader</option>
-                    <option value={500}>Bulldozer</option>
-                    <option value={400}>Compactor / roller</option>
+                  <select
+                    value={exEquipment}
+                    onChange={(e) => setExEquipment(e.target.value as typeof exEquipment)}
+                    className={inputClass}
+                  >
+                    <option value="excavator_standard">Excavator (standard) — {fmt(pricing.excavation.equipmentRates.excavator_standard)}/day</option>
+                    <option value="excavator_large">Excavator (large / heavy) — {fmt(pricing.excavation.equipmentRates.excavator_large)}/day</option>
+                    <option value="backhoe">Backhoe loader — {fmt(pricing.excavation.equipmentRates.backhoe)}/day</option>
+                    <option value="bulldozer">Bulldozer — {fmt(pricing.excavation.equipmentRates.bulldozer)}/day</option>
+                    <option value="compactor">Compactor / roller — {fmt(pricing.excavation.equipmentRates.compactor)}/day</option>
                   </select>
                 </div>
                 <div>
@@ -251,30 +397,57 @@ export default function ContractEstimator() {
                     <label className="text-xs font-medium text-charcoal/60">Number of units</label>
                     <span className="text-xs font-bold text-navy">{exUnits}</span>
                   </div>
-                  <input type="range" min={1} max={8} value={exUnits} onChange={(e) => setExUnits(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={1}
+                    max={pricing.excavation.maxUnits}
+                    value={exUnits}
+                    onChange={(e) => setExUnits(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <div className="flex justify-between mb-2">
                     <label className="text-xs font-medium text-charcoal/60">Hours per day</label>
                     <span className="text-xs font-bold text-navy">{exHrs} hrs</span>
                   </div>
-                  <input type="range" min={4} max={24} value={exHrs} onChange={(e) => setExHrs(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={pricing.excavation.minHoursPerDay}
+                    max={pricing.excavation.maxHoursPerDay}
+                    value={exHrs}
+                    onChange={(e) => setExHrs(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <div className="flex justify-between mb-2">
                     <label className="text-xs font-medium text-charcoal/60">Number of days</label>
                     <span className="text-xs font-bold text-navy">{exDays} days</span>
                   </div>
-                  <input type="range" min={1} max={30} value={exDays} onChange={(e) => setExDays(+e.target.value)} className="w-full accent-navy" />
+                  <input
+                    type="range"
+                    min={1}
+                    max={pricing.excavation.maxDays}
+                    value={exDays}
+                    onChange={(e) => setExDays(+e.target.value)}
+                    className="w-full accent-navy"
+                  />
                 </div>
                 <div>
                   <label className="text-xs font-medium text-charcoal/60 block mb-2">Operator included?</label>
-                  <select value={exOp} onChange={(e) => setExOp(+e.target.value)} className={inputClass}>
-                    <option value={1.2}>Yes — operator included</option>
-                    <option value={1}>No — equipment only</option>
+                  <select
+                    value={exOp}
+                    onChange={(e) => setExOp(e.target.value as typeof exOp)}
+                    className={inputClass}
+                  >
+                    <option value="with">Yes — operator included (×{pricing.excavation.operatorMultiplier})</option>
+                    <option value="without">No — equipment only</option>
                   </select>
                 </div>
-                <p className="text-xs text-charcoal/40">Base day rates vary by equipment · Operator: +20%</p>
+                <p className="text-xs text-charcoal/40">
+                  Extended hours (&gt;8hrs): +{fmt(pricing.excavation.extraHourlyRate)}/hr · Operator: ×{pricing.excavation.operatorMultiplier}
+                </p>
               </div>
             )}
           </div>
@@ -385,9 +558,16 @@ export default function ContractEstimator() {
             </div>
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-medium text-charcoal/60">Additional notes</label>
-              <textarea placeholder="Specific requirements, locations, questions..." rows={4} className={`${inputClass} resize-none`} />
+              <textarea
+                placeholder="Specific requirements, locations, questions..."
+                rows={4}
+                className={`${inputClass} resize-none`}
+              />
             </div>
-            <button type="submit" className="bg-gold text-navy font-bold text-sm py-3 rounded-lg hover:bg-gold-dark transition-colors duration-200">
+            <button
+              type="submit"
+              className="bg-gold text-navy font-bold text-sm py-3 rounded-lg hover:bg-gold-dark transition-colors duration-200"
+            >
               Submit contract inquiry
             </button>
           </form>
